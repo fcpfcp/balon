@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Balon Patlatma Oyunu</title>
+  <style>
+    :root{--bg:#0f1724;--panel:#0b1220;--accent:#3ddc84;--muted:#94a3b8}
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;background:linear-gradient(180deg,#071028 0%,#071829 100%);color:#e6eef6}
+    .game-wrap{max-width:900px;margin:20px auto;padding:16px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    h1{font-size:20px;margin:0}
+    .panel{background:rgba(255,255,255,0.03);padding:12px;border-radius:12px;display:flex;gap:12px;align-items:center}
+    .info{display:flex;gap:12px;align-items:center}
+    .stat{min-width:84px}
+    button{background:transparent;border:1px solid rgba(255,255,255,0.06);color:inherit;padding:8px 10px;border-radius:10px;cursor:pointer}
+    button:active{transform:translateY(1px)}
+    #gameCanvas{display:block;width:100%;height:60vh;background:linear-gradient(180deg,#052032 0%,#083146 100%);border-radius:12px;margin-top:12px;touch-action:none}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    .small{font-size:13px;color:var(--muted)}
+    footer{margin-top:8px;color:var(--muted);font-size:13px}
+    @media(min-width:900px){#gameCanvas{height:70vh}}
+  </style>
+</head>
+<body>
+  <div class="game-wrap">
+    <header>
+      <h1>Balon Patlatma Oyunu 🎈</h1>
+      <div class="panel">
+        <div class="info">
+          <div class="stat">Skor: <strong id="score">0</strong></div>
+          <div class="stat">Can: <strong id="lives">5</strong></div>
+          <div class="stat">Seviye: <strong id="level">1</strong></div>
+        </div>
+        <div class="controls">
+          <button id="startBtn">Başlat</button>
+          <button id="pauseBtn">Duraklat</button>
+          <button id="muteBtn">Sesi Kapat</button>
+          <button id="restartBtn">Yeniden</button>
+        </div>
+      </div>
+    </header>
+
+    <canvas id="gameCanvas" width="900" height="600"></canvas>
+
+    <footer>
+      Dokunarak veya fareyle balonları patlat. Zamanla balonlar daha hızlı çıkar ve daha zor olur.
+    </footer>
+  </div>
+
+  <script>
+  /* Balon Patlatma Oyunu - Tek dosyalık HTML/JS
+     Özellikler:
+     - Fare veya dokunmatik ile balon patlatma
+     - Skor, can (lives), seviye (level)
+     - Zorluk artışı: seviye başına daha hızlı spawn ve hız artışı
+     - Basit ses efektleri (WebAudio)
+     - Mobil uyumlu
+  */
+
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  // Yüksek DPI için ölçekleme
+  function resizeCanvas(){
+    const ratio = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    canvas.width = Math.round(w * ratio);
+    canvas.height = Math.round(h * ratio);
+    ctx.setTransform(ratio,0,0,ratio,0,0);
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  // DOM elemanları
+  const scoreEl = document.getElementById('score');
+  const livesEl = document.getElementById('lives');
+  const levelEl = document.getElementById('level');
+  const startBtn = document.getElementById('startBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const muteBtn = document.getElementById('muteBtn');
+
+  // Oyun durumu
+  let score = 0;
+  let lives = 5;
+  let level = 1;
+  let running = false;
+  let paused = false;
+  let muted = false;
+
+  // Zorluk ayarları
+  let spawnInterval = 1200; // ms
+  let lastSpawn = 0;
+  let balloons = [];
+  let lastTime = 0;
+  let popParticles = [];
+
+  // Ses - WebAudio kısa efektler
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  let audioCtx = null;
+  function ensureAudio(){ if(!audioCtx) audioCtx = new AudioCtx(); }
+  function playPop(){ if(muted) return; try{ ensureAudio(); const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type='sine'; o.frequency.value = 600 + Math.random()*300; g.gain.value = 0.08; o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.06); }catch(e){ /* ignore */ } }
+  function playMiss(){ if(muted) return; try{ ensureAudio(); const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type='square'; o.frequency.value = 160; g.gain.value = 0.06; o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.12); }catch(e){} }
+
+  // Yardımcılar
+  function rand(min,max){return Math.random()*(max-min)+min}
+
+  class Balloon{
+    constructor(x,y,r,speed,color){
+      this.x = x; this.y = y; this.r = r; this.speed = speed; this.color=color; this.popped=false; this.floatAngle = Math.random()*Math.PI*2;
+    }
+    update(dt){
+      this.y -= this.speed*dt;
+      this.x += Math.sin(this.floatAngle + Date.now()/1000)*0.4; // hafif salınım
+      if(this.y + this.r < -10) this.offscreen=true;
+    }
+    draw(ctx){
+      // gölge
+      ctx.save();
+      ctx.beginPath(); ctx.ellipse(this.x+4,this.y+6,this.r*0.9,this.r*0.5,0,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.12)'; ctx.fill();
+      // balon
+      ctx.beginPath(); ctx.ellipse(this.x,this.y,this.r,this.r*1.1,0,0,Math.PI*2); ctx.fillStyle=this.color; ctx.fill();
+      // parlama
+      ctx.beginPath(); ctx.ellipse(this.x - this.r*0.4, this.y - this.r*0.6, this.r*0.25, this.r*0.15, 0, 0, Math.PI*2);
+      ctx.fillStyle='rgba(255,255,255,0.45)'; ctx.fill();
+      // ip
+      ctx.beginPath(); ctx.moveTo(this.x, this.y + this.r*1.05); ctx.lineTo(this.x, this.y + this.r*2.2); ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1; ctx.stroke();
+      ctx.restore();
+    }
+    contains(px,py){
+      const dx = px - this.x, dy = py - this.y;
+      return dx*dx + dy*dy <= this.r*this.r;
+    }
+  }
+
+  class Particle{constructor(x,y,dx,dy,s,t){this.x=x;this.y=y;this.dx=dx;this.dy=dy;this.s=s;this.t=t} update(dt){this.x+=this.dx*dt;this.y+=this.dy*dt;this.t-=dt} draw(ctx){ctx.globalAlpha=Math.max(0,Math.min(1,this.t));ctx.fillRect(this.x-this.s/2,this.y-this.s/2,this.s,this.s);ctx.globalAlpha=1}}
+
+  function spawnBalloon(){
+    const w = canvas.clientWidth;
+    const r = rand(18,44) * (1 - Math.min(0.6,(level-1)*0.06));
+    const x = rand(r, w - r);
+    const y = canvas.clientHeight + r + 10;
+    const baseSpeed = rand(30,55);
+    const speed = baseSpeed + (level-1)*6 + (44-r)*0.2; // seviye arttıkça hız artar
+    const colors = ['#ff6b6b','#ffd166','#6bf178','#7ad0ff','#c38fff','#ff7ab6'];
+    const color = colors[Math.floor(Math.random()*colors.length)];
+    balloons.push(new Balloon(x,y,r,speed,color));
+  }
+
+  function updateGame(time){
+    if(!running || paused) { lastTime = time; requestAnimationFrame(updateGame); return; }
+    const dt = Math.min(0.05, (time - lastTime) / 1000);
+    lastTime = time;
+
+    // spawn
+    if(time - lastSpawn > spawnInterval){ spawnBalloon(); lastSpawn = time; }
+
+    // update balloons
+    for(let i=balloons.length-1;i>=0;i--){ const b = balloons[i]; b.update(dt); if(b.offscreen && !b.popped){ balloons.splice(i,1); // can kaybı
+        lives -= 1; playMiss(); updateHud(); if(lives<=0){ endGame(); return; } }
+      else if(b.popped){balloons.splice(i,1);} }
+
+    // particles
+    for(let i=popParticles.length-1;i>=0;i--){ const p = popParticles[i]; p.update(dt); if(p.t<=0) popParticles.splice(i,1); }
+
+    // artan zorluk: seviye atlama
+    const nextLevelThreshold = 10 + (level-1)*10;
+    if(score >= nextLevelThreshold){ level += 1; levelUp(); }
+
+    draw();
+    requestAnimationFrame(updateGame);
+  }
+
+  function draw(){
+    const w = canvas.clientWidth; const h = canvas.clientHeight;
+    ctx.clearRect(0,0,w,h);
+
+    // arkaplan hafif degradeyns
+    const grd = ctx.createLinearGradient(0,0,0,h); grd.addColorStop(0,'#052032'); grd.addColorStop(1,'#083146'); ctx.fillStyle = grd; ctx.fillRect(0,0,w,h);
+
+    // balonlar (arka -> ön)
+    balloons.sort((a,b)=>a.r-b.r);
+    for(const b of balloons) b.draw(ctx);
+
+    // partiküller
+    for(const p of popParticles){ ctx.fillStyle='rgba(255,255,255,0.9)'; p.draw(ctx); }
+
+    // kısa hud merkezi
+    ctx.fillStyle='rgba(255,255,255,0.06)'; ctx.fillRect(12,12,220,48);
+  }
+
+  function updateHud(){ scoreEl.textContent = score; livesEl.textContent = lives; levelEl.textContent = level; }
+
+  function levelUp(){ // seviye arttığında zorluk ayarları
+    spawnInterval = Math.max(400, spawnInterval - 120);
+    // balonların maksimum hızı dolayısıyla daha zorlu
+    // küçük görsel efekt
+    for(let i=0;i<20;i++) popParticles.push(new Particle(rand(30,canvas.clientWidth-30), rand(30,canvas.clientHeight-30), rand(-60,60), rand(-40,40), rand(2,6), 0.6));
+  }
+
+  function popBalloonAt(px,py){
+    for(let i=balloons.length-1;i>=0;i--){const b=balloons[i]; if(b.contains(px,py)){
+        // puan: balon boyutuna göre
+        const gained = Math.round(10 + (50 - b.r));
+        score += gained; playPop(); b.popped=true;
+        // partiküller
+        for(let k=0;k<10;k++) popParticles.push(new Particle(b.x, b.y, rand(-120,120), rand(-120,120), rand(2,5), rand(0.4,0.9)));
+        updateHud(); return true; }}
+    return false;
+  }
+
+  // Fare ve dokunmatik kontrol
+  function getEventPos(e){
+    const rect = canvas.getBoundingClientRect();
+    if(e.touches && e.touches.length>0){ return {x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top}; }
+    return {x: e.clientX - rect.left, y: e.clientY - rect.top};
+  }
+
+  canvas.addEventListener('pointerdown', (e)=>{
+    e.preventDefault(); if(!running) return; if(paused) return;
+    const p = getEventPos(e);
+    const hit = popBalloonAt(p.x, p.y);
+    if(!hit){ /* boş yere dokunuldu -> küçük ceza */ }
+  });
+
+  // Başlat/durdur/yeniden
+  function startGame(){ if(running) return; running=true; paused=false; score=0; lives=5; level=1; spawnInterval=1200; balloons=[]; popParticles=[]; lastSpawn=0; lastTime=performance.now(); updateHud(); requestAnimationFrame(updateGame); }
+  function endGame(){ running=false; paused=false; updateHud(); // ekran ortası mesaj
+    setTimeout(()=>{
+      const restart = confirm('Oyun bitti! Skorunuz: ' + score + '\nTekrar oynamak ister misiniz?'); if(restart) { startGame(); }
+    }, 100);
+  }
+  function togglePause(){ if(!running) return; paused = !paused; pauseBtn.textContent = paused ? 'Devam Et' : 'Duraklat'; }
+  function restartGame(){ running=false; setTimeout(()=>startGame(), 120); }
+  function toggleMute(){ muted = !muted; muteBtn.textContent = muted ? 'Sesi Aç' : 'Sesi Kapat'; }
+
+  startBtn.addEventListener('click', ()=>{ if(!running) startGame(); else alert('Oyun zaten çalışıyor.'); });
+  pauseBtn.addEventListener('click', ()=>togglePause());
+  restartBtn.addEventListener('click', ()=>restartGame());
+  muteBtn.addEventListener('click', ()=>toggleMute());
+
+  // Başlangıçta dokunma/klik uyaranı (mobil ses izni için)
+  function unlockAudioOnUserGesture(){ const fn = ()=>{ try{ ensureAudio(); }catch(e){} window.removeEventListener('pointerdown',fn); }; window.addEventListener('pointerdown',fn);
+  }
+  unlockAudioOnUserGesture();
+
+  // Başlangıç çizimi
+  draw();
+
+  // Kısa yardım: klavye
+  window.addEventListener('keydown', (e)=>{
+    if(e.key === 'p') togglePause();
+    if(e.key === 'm') toggleMute();
+    if(e.key === ' ') { if(!running) startGame(); else restartGame(); }
+  });
+
+  </script>
+</body>
+</html>
